@@ -1,0 +1,342 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HDD Manufacturing Analytics</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.2/dist/chart.umd.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #0f1117;
+      color: #e2e8f0;
+      min-height: 100vh;
+    }
+
+    header {
+      background: #1a1d27;
+      border-bottom: 1px solid #2d3148;
+      padding: 18px 32px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    header h1 { font-size: 1.2rem; font-weight: 600; letter-spacing: 0.02em; }
+    header .badge {
+      font-size: 0.7rem;
+      background: #3b4fd8;
+      color: #c7d2fe;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-weight: 600;
+      letter-spacing: 0.05em;
+    }
+    .storage-badge {
+      margin-left: auto;
+      font-size: 0.72rem;
+      color: #64748b;
+    }
+
+    main { padding: 28px 32px; max-width: 1400px; margin: 0 auto; }
+
+    /* ── Summary cards ── */
+    .cards {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+      gap: 16px;
+      margin-bottom: 32px;
+    }
+    .card {
+      background: #1a1d27;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .card-label { font-size: 0.72rem; color: #64748b; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+    .card-value { font-size: 1.8rem; font-weight: 700; line-height: 1; }
+    .card-value.warn { color: #f59e0b; }
+    .card-value.ok   { color: #34d399; }
+    .card-value.info { color: #60a5fa; }
+
+    /* ── Grid layout ── */
+    .grid-2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+    .grid-1 { margin-bottom: 20px; }
+
+    @media (max-width: 900px) { .grid-2 { grid-template-columns: 1fr; } }
+
+    /* ── Panels ── */
+    .panel {
+      background: #1a1d27;
+      border: 1px solid #2d3148;
+      border-radius: 10px;
+      padding: 20px;
+    }
+    .panel h2 {
+      font-size: 0.8rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: #94a3b8;
+      margin-bottom: 16px;
+    }
+    .chart-wrap { position: relative; height: 240px; }
+
+    /* ── Tables ── */
+    table { width: 100%; border-collapse: collapse; font-size: 0.82rem; }
+    th {
+      text-align: left;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      color: #64748b;
+      padding: 6px 10px;
+      border-bottom: 1px solid #2d3148;
+    }
+    td { padding: 7px 10px; border-bottom: 1px solid #1e2235; }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: #1e2235; }
+
+    .pill {
+      display: inline-block;
+      padding: 2px 8px;
+      border-radius: 9999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+    }
+    .pill-red  { background: #3f1515; color: #f87171; }
+    .pill-grn  { background: #0f2e1e; color: #34d399; }
+    .pill-yel  { background: #3b2a00; color: #fbbf24; }
+
+    .loading { color: #475569; font-size: 0.85rem; padding: 20px 0; text-align: center; }
+    .error   { color: #f87171; font-size: 0.85rem; padding: 12px; background: #2a0f0f; border-radius: 6px; }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>HDD Manufacturing Analytics</h1>
+  <span class="badge">LIVE</span>
+  <span class="storage-badge" id="storage-mode">loading…</span>
+</header>
+
+<main>
+  <!-- Summary cards -->
+  <div class="cards" id="cards">
+    <div class="card"><div class="card-label">Unique Drives</div><div class="card-value info" id="c-drives">—</div></div>
+    <div class="card"><div class="card-label">Active Machines</div><div class="card-value info" id="c-machines">—</div></div>
+    <div class="card"><div class="card-label">Total Records</div><div class="card-value info" id="c-records">—</div></div>
+    <div class="card"><div class="card-label">Overall Fail %</div><div class="card-value warn" id="c-fail">—</div></div>
+    <div class="card"><div class="card-label">Avg Temp (°C)</div><div class="card-value ok" id="c-temp">—</div></div>
+    <div class="card"><div class="card-label">Avg Read MB/s</div><div class="card-value ok" id="c-read">—</div></div>
+    <div class="card"><div class="card-label">Avg Write MB/s</div><div class="card-value ok" id="c-write">—</div></div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Fail rate by phase -->
+    <div class="panel">
+      <h2>Fail Rate by Test Phase</h2>
+      <div class="chart-wrap"><canvas id="chart-fail-phase"></canvas></div>
+    </div>
+    <!-- Throughput by firmware -->
+    <div class="panel">
+      <h2>Throughput by Firmware Version</h2>
+      <div class="chart-wrap"><canvas id="chart-fw"></canvas></div>
+    </div>
+  </div>
+
+  <div class="grid-2">
+    <!-- Reallocated sector trend -->
+    <div class="panel">
+      <h2>Reallocated Sectors — Daily Trend</h2>
+      <div class="chart-wrap"><canvas id="chart-realloc"></canvas></div>
+    </div>
+    <!-- Vibration outliers -->
+    <div class="panel">
+      <h2>Vibration Outliers (&gt; 2.5σ)</h2>
+      <div id="tbl-vibration"><div class="loading">Loading…</div></div>
+    </div>
+  </div>
+
+  <!-- Zone heatmap -->
+  <div class="grid-1 panel">
+    <h2>Zone × Phase Failure Heatmap</h2>
+    <div id="tbl-zone"><div class="loading">Loading…</div></div>
+  </div>
+</main>
+
+<script>
+const API = "";  // same origin
+
+const CHART_DEFAULTS = {
+  color: "#e2e8f0",
+  plugins: { legend: { labels: { color: "#94a3b8", font: { size: 11 } } } },
+  scales: {
+    x: { ticks: { color: "#64748b" }, grid: { color: "#1e2235" } },
+    y: { ticks: { color: "#64748b" }, grid: { color: "#1e2235" } },
+  },
+};
+
+async function fetchJSON(path) {
+  const res = await fetch(API + path);
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json();
+}
+
+// ── Summary cards ────────────────────────────────────────
+async function loadSummary() {
+  try {
+    const d = await fetchJSON("/api/summary");
+    document.getElementById("c-drives").textContent   = d.unique_drives?.toLocaleString()  ?? "—";
+    document.getElementById("c-machines").textContent = d.active_machines ?? "—";
+    document.getElementById("c-records").textContent  = d.total_records?.toLocaleString() ?? "—";
+    document.getElementById("c-fail").textContent     = d.overall_fail_pct != null ? d.overall_fail_pct + "%" : "—";
+    document.getElementById("c-temp").textContent     = d.avg_temp_c != null ? d.avg_temp_c + " °C" : "—";
+    document.getElementById("c-read").textContent     = d.avg_read_mbps ?? "—";
+    document.getElementById("c-write").textContent    = d.avg_write_mbps ?? "—";
+    document.getElementById("storage-mode").textContent = "local parquet";
+  } catch (e) {
+    document.getElementById("c-drives").textContent = "error";
+    console.error(e);
+  }
+}
+
+// ── Fail rate by phase ───────────────────────────────────
+async function loadFailByPhase() {
+  try {
+    const data = await fetchJSON("/api/fail-rate-by-phase");
+    const labels = data.map(r => r.test_phase.replace("_", " "));
+    const values = data.map(r => r.fail_pct);
+    new Chart(document.getElementById("chart-fail-phase"), {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [{
+          label: "Fail %",
+          data: values,
+          backgroundColor: values.map(v => v > 4 ? "#ef4444" : v > 2 ? "#f59e0b" : "#34d399"),
+          borderRadius: 4,
+        }],
+      },
+      options: {
+        ...CHART_DEFAULTS,
+        indexAxis: "y",
+        plugins: { ...CHART_DEFAULTS.plugins, legend: { display: false } },
+        scales: {
+          x: { ...CHART_DEFAULTS.scales.x, title: { display: true, text: "Fail %", color: "#64748b" } },
+          y: { ...CHART_DEFAULTS.scales.y },
+        },
+      },
+    });
+  } catch (e) { console.error(e); }
+}
+
+// ── Throughput by firmware ───────────────────────────────
+async function loadFirmwareThroughput() {
+  try {
+    const data = await fetchJSON("/api/throughput-by-firmware");
+    const labels = data.map(r => r.firmware_version);
+    new Chart(document.getElementById("chart-fw"), {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [
+          { label: "Read MB/s",  data: data.map(r => r.avg_read_mbps),  backgroundColor: "#3b82f6", borderRadius: 4 },
+          { label: "Write MB/s", data: data.map(r => r.avg_write_mbps), backgroundColor: "#8b5cf6", borderRadius: 4 },
+        ],
+      },
+      options: {
+        ...CHART_DEFAULTS,
+        plugins: { ...CHART_DEFAULTS.plugins },
+        scales: {
+          x: { ...CHART_DEFAULTS.scales.x },
+          y: { ...CHART_DEFAULTS.scales.y, title: { display: true, text: "MB/s", color: "#64748b" } },
+        },
+      },
+    });
+  } catch (e) { console.error(e); }
+}
+
+// ── Reallocated sector trend ─────────────────────────────
+async function loadReallocTrend() {
+  try {
+    const data = await fetchJSON("/api/reallocated-trend");
+    new Chart(document.getElementById("chart-realloc"), {
+      type: "line",
+      data: {
+        labels: data.map(r => r.date),
+        datasets: [{
+          label: "Drives with realloc sectors",
+          data: data.map(r => r.drives_with_realloc),
+          borderColor: "#f59e0b",
+          backgroundColor: "rgba(245,158,11,0.1)",
+          fill: true,
+          tension: 0.3,
+          pointRadius: 3,
+        }],
+      },
+      options: {
+        ...CHART_DEFAULTS,
+        plugins: { ...CHART_DEFAULTS.plugins, legend: { display: false } },
+      },
+    });
+  } catch (e) { console.error(e); }
+}
+
+// ── Vibration outliers table ─────────────────────────────
+async function loadVibrationOutliers() {
+  const el = document.getElementById("tbl-vibration");
+  try {
+    const data = await fetchJSON("/api/vibration-outliers");
+    if (!data.length) { el.innerHTML = '<div class="loading">No outliers found.</div>'; return; }
+    el.innerHTML = `<table>
+      <thead><tr><th>Serial</th><th>Machine</th><th>Zone</th><th>Vibration (mg)</th><th>Z-score</th></tr></thead>
+      <tbody>${data.slice(0, 8).map(r => `
+        <tr>
+          <td>${r.serial_number}</td>
+          <td>${r.machine_id}</td>
+          <td>${r.factory_zone}</td>
+          <td>${r.vibration_rms_mg}</td>
+          <td><span class="pill ${r.z_score > 3 ? 'pill-red' : 'pill-yel'}">${r.z_score}σ</span></td>
+        </tr>`).join("")}
+      </tbody></table>`;
+  } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
+}
+
+// ── Zone heatmap table ───────────────────────────────────
+async function loadZoneHeatmap() {
+  const el = document.getElementById("tbl-zone");
+  try {
+    const data = await fetchJSON("/api/zone-heatmap");
+    el.innerHTML = `<table>
+      <thead><tr><th>Zone</th><th>Phase</th><th>Total</th><th>Failures</th><th>Fail %</th></tr></thead>
+      <tbody>${data.map(r => {
+        const pct = r.fail_pct;
+        const cls = pct > 5 ? "pill-red" : pct > 2 ? "pill-yel" : "pill-grn";
+        return `<tr>
+          <td>${r.factory_zone}</td>
+          <td>${r.test_phase.replace("_", " ")}</td>
+          <td>${r.total}</td>
+          <td>${r.failures}</td>
+          <td><span class="pill ${cls}">${pct}%</span></td>
+        </tr>`;
+      }).join("")}
+      </tbody></table>`;
+  } catch (e) { el.innerHTML = `<div class="error">${e.message}</div>`; }
+}
+
+// ── Boot ────────────────────────────────────────────────
+loadSummary();
+loadFailByPhase();
+loadFirmwareThroughput();
+loadReallocTrend();
+loadVibrationOutliers();
+loadZoneHeatmap();
+</script>
+</body>
+</html>
