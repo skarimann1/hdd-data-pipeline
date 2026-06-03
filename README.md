@@ -1,8 +1,131 @@
 # HDD Manufacturing Data Pipeline — System Design
 
 **Author:** Sakthi Karimanal  
-**Role:** Software Engineer — Data Platform  
-**Company:** Western Digital  
+
+## Quickstart
+
+### 1. Set up the environment
+
+```bash
+# Create and activate the virtual environment
+/opt/homebrew/bin/python3 -m venv .venv
+
+# Install all dependencies
+.venv/bin/pip install -r requirements.txt
+```
+
+### 2. Configure AWS credentials
+
+```bash
+# Copy the template and fill in your values
+cp .env.example .env
+```
+
+Edit `.env`:
+```
+AWS_ACCESS_KEY_ID=your_access_key_here
+AWS_SECRET_ACCESS_KEY=your_secret_key_here
+AWS_REGION=
+S3_BUCKET=
+S3_PREFIX=
+STORAGE_MODE=local        # change to "s3" to write to S3
+```
+
+---
+
+## Running the Pipeline
+
+### Full demo (batch + streaming + analytics)
+```bash
+.venv/bin/python pipeline.py
+```
+
+### Full demo with a clean slate (wipes data/ and dlq/)
+```bash
+.venv/bin/python pipeline.py --clean
+```
+
+### Control how many frames are generated
+```bash
+.venv/bin/python pipeline.py --frames 2000
+```
+
+### Run only batch ingestion
+```bash
+.venv/bin/python pipeline.py --mode batch
+```
+
+### Run only streaming ingestion
+```bash
+.venv/bin/python pipeline.py --mode stream
+```
+
+### Run only analytics queries (requires existing data)
+```bash
+.venv/bin/python pipeline.py --mode query
+```
+
+---
+
+## Running the Dashboard
+
+### Start the API server
+```bash
+.venv/bin/uvicorn api:app --reload --port 8000
+```
+
+### Open the dashboard in the browser
+```
+http://localhost:8000
+```
+
+### View raw API responses
+```
+http://localhost:8000/api/summary
+http://localhost:8000/api/fail-rate-by-phase
+http://localhost:8000/api/throughput-by-firmware
+http://localhost:8000/api/zone-heatmap
+http://localhost:8000/api/reallocated-trend
+http://localhost:8000/api/vibration-outliers
+http://localhost:8000/api/recent-failures
+http://localhost:8000/api/hot-machines
+```
+
+### Stop the server
+```bash
+lsof -ti :8000 | xargs kill -9
+```
+
+---
+
+## Storage Modes
+
+### Local mode (default — no AWS needed)
+```bash
+# In .env set:
+STORAGE_MODE=local
+
+# Data is written to ./data/**/*.parquet
+.venv/bin/python pipeline.py --frames 1000 --clean
+```
+
+### S3 mode (requires AWS credentials in .env)
+```bash
+# In .env set:
+STORAGE_MODE=s3
+
+# Verify S3 connection before running
+.venv/bin/python -c "
+from dotenv import load_dotenv; load_dotenv('.env')
+import config, boto3
+s3 = boto3.client('s3', region_name=config.AWS_REGION)
+s3.head_bucket(Bucket=config.S3_BUCKET)
+print('S3 connected:', config.S3_BUCKET)
+"
+
+# Run the pipeline — Parquet files upload directly to S3
+.venv/bin/python pipeline.py --frames 1000
+```
 
 ---
 
@@ -13,7 +136,7 @@ temperature, RPM, read/write throughput, vibration, sector health — for every
 drive under test. This data needs to be:
 
 - **Decoded** from proprietary binary frames into structured records
-- **Validated** and bad records quarantined without data loss
+- **Validated** and bad records separated without data loss
 - **Stored** efficiently for long-term retention
 - **Queryable** by firmware and QA engineers for failure analysis and regression detection
 - **Visualised** in a live dashboard
@@ -23,18 +146,17 @@ drive under test. This data needs to be:
 ## 2. Requirements
 
 ### Functional
-- Ingest binary telemetry from 16+ test stations across 4 factory zones
+- Ingest binary telemetry from 16+ imaginary test stations across 4 factory zones
 - Decode, validate, and deduplicate records before storage
 - Route invalid records to a Dead-Letter Queue for inspection and reprocessing
 - Support both batch (historical backfill) and streaming (live feed) ingestion
 - Expose analytics queries via a REST API
-- Serve a live web dashboard for firmware engineers
+- Serve a web dashboard for firmware engineers
 
 ### Non-Functional
-- **Correctness:** idempotent writes — re-running ingestion must not create duplicates
-- **Durability:** no silent data loss — bad records go to DLQ, not /dev/null
+- **Correctness:** idempotent writes; re-running ingestion must not create duplicates
+- **Durability:** no silent data loss since bad records go to DLQ
 - **Query performance:** aggregations over millions of rows in under 5 seconds
-- **Cost efficiency:** pay-per-query model preferred over always-on cluster
 - **Security:** AWS credentials never exposed to the browser
 
 ---
@@ -82,8 +204,8 @@ drive under test. This data needs to be:
 │                                                                   │
 │   Amazon S3  (object storage)                                     │
 │                                                                   │
-│   s3://hddpipeline-100160018995-us-west-2-an/                     │
-│   └── hdd-data/                                                   │
+│                     │
+│   hdd-data/                                                   │
 │       └── year=2026/                                              │
 │           └── month=06/                                           │
 │               ├── day=01/                                         │
@@ -314,33 +436,7 @@ fixes the bug, and replays the DLQ records through the pipeline.
 
 ---
 
-## 9. API Design
-
-```
-Client (browser)          FastAPI (api.py)           DuckDB → S3
-────────────────          ───────────────            ──────────
-                          credentials stay
-                          server-side — never
-                          exposed to browser
-
-GET /api/summary     ──►  summary_stats()       ──►  SELECT COUNT(*), AVG(...)
-                     ◄──  { unique_drives: 500 }
-
-GET /api/zone-heatmap ──► zone_failure_heatmap() ──► GROUP BY zone, test_phase
-                      ◄── [ { zone: "A1", ... } ]
-
-GET /api/recent-failures?hours=24
-                      ──► recent_failures(24)    ──►  WHERE timestamp > NOW()-24h
-                      ◄── [ { serial: "WDC...", status: "fail" } ]
-```
-
-All endpoints return JSON. FastAPI auto-converts Python dicts/lists.
-CORS is open (`allow_origins=["*"]`) for the demo — in production this would
-be locked to the internal dashboard domain.
-
----
-
-## 10. Security Considerations
+## 9. Security Considerations
 
 | Risk | Mitigation |
 |---|---|
@@ -352,7 +448,7 @@ be locked to the internal dashboard domain.
 
 ---
 
-## 11. Production Scaling Path
+## 10. Production Scaling Path
 
 ```
 Current (demo)                    Production at WD scale
@@ -370,7 +466,7 @@ Data volume: ~500 records/run     Data volume: millions/day across global factor
 
 ---
 
-## 12. Tech Stack Summary
+## 11. Tech Stack Summary
 
 | Layer | Technology | Why |
 |---|---|---|
@@ -382,28 +478,3 @@ Data volume: ~500 records/run     Data volume: millions/day across global factor
 | Frontend | Vanilla JS + Chart.js | No build step, runs in any browser |
 | Dead-letter queue | NDJSON files (→ Redis in prod) | Append-only, inspectable, replayable |
 | Deduplication | SHA-1 record_id set (→ Redis in prod) | Idempotent writes, crash-safe |
-
----
-
-## 13. File Structure
-
-```
-hdd_pipeline/
-├── generator.py       Simulates machine binary frame output
-├── decoder.py         CRC32 verify + struct unpack → HddRecord
-├── validator.py       Business rule validation + DeadLetterQueue
-├── storage.py         Partitioned Parquet writes (local + S3)
-├── ingestion.py       Batch and streaming orchestration
-├── analytics.py       DuckDB queries (local and S3 mode)
-├── api.py             FastAPI REST endpoints
-├── config.py          Reads .env — AWS creds, storage mode
-├── pipeline.py        End-to-end demo runner
-├── requirements.txt
-├── .env               AWS credentials (git-ignored)
-├── .env.example       Template for new developers
-├── .gitignore
-├── dashboard/
-│   └── index.html     Frontend — Chart.js dashboard
-├── data/              Local Parquet files (git-ignored)
-└── dlq/               Dead-letter queue files (git-ignored)
-```
