@@ -14,7 +14,9 @@ These are the kinds of queries firmware engineers actually run:
   - "How many reallocated sectors appeared in the last 24 hours?"
 """
 
+from datetime import datetime, timezone
 from pathlib import Path
+
 import duckdb
 
 
@@ -24,8 +26,11 @@ class HddAnalytics:
                  s3_prefix: str = "hdd-data",
                  aws_access_key: str = "",
                  aws_secret_key: str = "",
-                 aws_region: str = "us-west-2"):
+                 aws_region: str = "us-west-2",
+                 max_staleness_minutes: int = 60):
         self._con = duckdb.connect()
+        self._data_dir = Path(data_dir) if data_dir else None
+        self._max_staleness_minutes = max_staleness_minutes
 
         if s3_bucket and aws_access_key:
             # S3 mode — DuckDB reads Parquet directly from S3 via httpfs.
@@ -36,16 +41,71 @@ class HddAnalytics:
             self._con.execute(f"SET s3_secret_access_key='{aws_secret_key}';")
             glob = f"s3://{s3_bucket}/{s3_prefix.rstrip('/')}/**/*.parquet"
         else:
-            # Local mode — reads from the local data directory
+            # Local mode — validate files before creating the view
+            self._validate_parquet_files()
             glob = str(Path(data_dir) / "**" / "*.parquet")
 
+        # union_by_name=true handles schema evolution: new columns from newer
+        # firmware versions are NULL-filled when reading older Parquet files.
         self._con.execute(f"""
             CREATE OR REPLACE VIEW hdd_data AS
-            SELECT * FROM read_parquet('{glob}', hive_partitioning=true)
+            SELECT * FROM read_parquet('{glob}', hive_partitioning=true,
+                                       union_by_name=true)
         """)
 
-    def query(self, sql: str) -> "duckdb.DuckDBPyRelation":
-        return self._con.execute(sql).df()
+    def query(self, sql: str) -> "pd.DataFrame":
+        try:
+            return self._con.execute(sql).df()
+        except duckdb.IOException as exc:
+            raise RuntimeError(
+                f"Query failed — possible corrupt Parquet file. "
+                f"Run validate_parquet_files() to identify it. Detail: {exc}"
+            ) from exc
+
+    def data_freshness(self) -> dict:
+        """Returns last ingestion time and whether data is within the staleness threshold."""
+        if self._data_dir is None:
+            return {"last_ingested_at": None, "stale": False, "message": "S3 mode — staleness not tracked locally"}
+
+        marker = self._data_dir / "_last_ingested.txt"
+        if not marker.exists():
+            return {"last_ingested_at": None, "stale": True, "message": "No ingestion marker found — pipeline may never have run"}
+
+        last = datetime.fromisoformat(marker.read_text().strip())
+        age_minutes = (datetime.now(timezone.utc) - last).total_seconds() / 60
+        stale = age_minutes > self._max_staleness_minutes
+        return {
+            "last_ingested_at": last.isoformat(),
+            "age_minutes": round(age_minutes, 1),
+            "stale": stale,
+            "message": (
+                f"Data is {age_minutes:.1f}m old — exceeds {self._max_staleness_minutes}m threshold"
+                if stale else
+                f"Data is fresh ({age_minutes:.1f}m old)"
+            ),
+        }
+
+    def validate_parquet_files(self) -> dict:
+        """Scans all local Parquet files and reports any that are corrupt or unreadable."""
+        if self._data_dir is None:
+            return {"skipped": True, "reason": "S3 mode"}
+        return self._validate_parquet_files()
+
+    def _validate_parquet_files(self) -> dict:
+        if self._data_dir is None:
+            return {}
+        files = list(self._data_dir.rglob("*.parquet"))
+        corrupt, ok = [], 0
+        for f in files:
+            try:
+                pq_file = __import__("pyarrow.parquet", fromlist=["ParquetFile"]).ParquetFile(f)
+                pq_file.schema  # reading schema catches most corruption
+                ok += 1
+            except Exception as exc:
+                corrupt.append({"file": str(f), "error": str(exc)})
+                import logging
+                logging.getLogger(__name__).warning("Corrupt Parquet file detected: %s — %s", f, exc)
+        return {"ok": ok, "corrupt": len(corrupt), "corrupt_files": corrupt}
 
     # ------------------------------------------------------------------
     # Canned queries for firmware / QA engineers
