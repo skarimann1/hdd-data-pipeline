@@ -436,7 +436,15 @@ fixes the bug, and replays the DLQ records through the pipeline.
 
 ---
 
-## 9. Security Considerations
+## 9. Pipeline Recovery
+
+Three design choices were made to deal with failures in the architecture:
+
+- **CRC32:** bad data is detected immediately, not silently passed through
+- **DLQ:** no records are dropped; they're quarantined for replay
+- **record_id dedup:** any component can safely replay/retry without double-counting
+
+## 10. Security Considerations
 
 | Risk | Mitigation |
 |---|---|
@@ -448,7 +456,7 @@ fixes the bug, and replays the DLQ records through the pipeline.
 
 ---
 
-## 10. Production Scaling Path
+## 11. Production Scaling Path
 
 ```
 Current (demo)                    Production at WD scale
@@ -466,7 +474,7 @@ Data volume: ~500 records/run     Data volume: millions/day across global factor
 
 ---
 
-## 11. Tech Stack Summary
+## 12. Tech Stack Summary
 
 | Layer | Technology | Why |
 |---|---|---|
