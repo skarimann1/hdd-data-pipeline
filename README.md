@@ -436,13 +436,70 @@ fixes the bug, and replays the DLQ records through the pipeline.
 
 ---
 
-## 9. Pipeline Recovery
+## 9. Failure Recovery
 
-Three design choices were made to deal with failures in the architecture:
+Every component is designed to fail safely and resume without data loss.
 
-- **CRC32:** bad data is detected immediately, not silently passed through
-- **DLQ:** no records are dropped; they're quarantined for replay
-- **record_id dedup:** any component can safely replay/retry without double-counting
+### Invariants that make recovery possible
+
+| Invariant | Where | Why it matters |
+|---|---|---|
+| CRC32 per frame | `decoder.py` | Corrupt frames are detected immediately, never passed downstream |
+| Dead-Letter Queue | `validator.py` | No record is dropped — invalid frames are quarantined for replay |
+| `record_id` dedup | `storage.py` | Any stage can replay/retry without double-counting |
+| Atomic writes | `storage.py` | A crash mid-write leaves a `.tmp` file — the final `.parquet` is never half-written |
+| Schema version metadata | `storage.py` | Each file carries its schema version so readers can detect drift |
+
+### Recovery by component
+
+```
+GENERATOR (machine goes offline)
+  ├─ Partial/truncated frames fail CRC32 → routed to DLQ automatically
+  └─ On reconnect: replay from last sequence number; dedup drops seen record_ids
+
+DECODER (DecodeError storm from bad firmware)
+  ├─ All failures go to DLQ — raw base64 payload preserved for replay
+  └─ Once firmware is patched: re-run DLQ entries through the pipeline
+
+VALIDATOR / DLQ (disk full)
+  ├─ DLQ write failure bubbles up and halts the batch — records are NOT silently dropped
+  └─ DLQ is append-only NDJSON — safe to resume appending after clearing space
+
+STORAGE / PARQUET (crash during write)
+  ├─ Atomic temp-then-rename: only complete files are ever visible to readers
+  ├─ Partition layout limits blast radius to the in-flight partition only
+  └─ Replay the same batch after restart — dedup index skips already-written records
+
+SERVING / ANALYTICS (stale or corrupt data)
+  ├─ data_freshness() checks _last_ingested.txt — surfaces staleness before queries run
+  ├─ validate_parquet_files() scans each file's footer at init — logs corrupt files by name
+  ├─ union_by_name=true in DuckDB view — NULL-fills missing columns across schema versions
+  └─ Query errors from corrupt files include a prompt to call validate_parquet_files()
+```
+
+### DLQ replay pattern
+
+DLQ replay is **not a manual developer task**. In production it is triggered automatically:
+
+```
+Firmware bug deployed
+        │
+        ▼
+DLQ spike detected (monitoring alerts on dlq_rejected_total)
+        │
+        ▼
+Fix deployed (new firmware version pushed to machines)
+        │
+        ▼
+Airflow DAG / replay job fires automatically
+  ├─ reads all DLQ files written during the bad-firmware window
+  ├─ calls run_batch_ingestion() on the raw frames
+  └─ dedup index skips any records already written — replay is safe to re-run
+```
+
+The replay job is idempotent: `record_id` deduplication means running it twice produces the same result as running it once. In this demo, `pipeline.py --mode replay` (not yet implemented) would cover this path; in production it would be a scheduled Airflow task gated on a firmware-version condition.
+
+---
 
 ## 10. Security Considerations
 
