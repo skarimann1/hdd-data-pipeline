@@ -20,6 +20,7 @@ Idempotent writes:
 
 import io
 import logging
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -31,6 +32,8 @@ import pyarrow.parquet as pq
 from decoder import HddRecord
 
 logger = logging.getLogger(__name__)
+
+SCHEMA_VERSION = 1
 
 SCHEMA = pa.schema([
     pa.field("record_id",           pa.string()),
@@ -91,6 +94,7 @@ class ParquetStorage:
             written += self._write_partition_group(partition_key, group)
 
         self._save_dedup_index()
+        self._save_last_ingested()
         logger.info("write_batch: wrote %d, skipped %d duplicates",
                     written, duplicates)
         return {"written": written, "duplicates": duplicates, "total": len(records)}
@@ -148,7 +152,9 @@ class ParquetStorage:
                              len(chunk), self._s3_bucket, s3_key)
             else:
                 path = self._next_part_path(pdir)
-                pq.write_table(table, path, compression="snappy")
+                tmp  = path.with_suffix(".parquet.tmp")
+                pq.write_table(table, tmp, compression="snappy")
+                tmp.rename(path)
                 logger.debug("wrote %d records → %s", len(chunk), path)
 
             total += len(chunk)
@@ -160,7 +166,8 @@ class ParquetStorage:
         df   = pd.DataFrame(rows)
         # Convert ISO string back to datetime for proper Parquet timestamp type
         df["timestamp_utc"] = pd.to_datetime(df["timestamp_utc"], utc=True, format="ISO8601")
-        return pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False)
+        table = pa.Table.from_pandas(df, schema=SCHEMA, preserve_index=False)
+        return table.replace_schema_metadata({"schema_version": str(SCHEMA_VERSION)})
 
     # ------------------------------------------------------------------
     # Deduplication index  (in production: a Redis set or bloom filter)
@@ -189,3 +196,21 @@ class ParquetStorage:
                 self._dedup_index.add(r.record_id)
                 new.append(r)
         return new, dup_count
+
+    # ------------------------------------------------------------------
+    # Freshness tracking
+    # ------------------------------------------------------------------
+
+    def _last_ingested_path(self) -> Path:
+        return self._root / "_last_ingested.txt"
+
+    def _save_last_ingested(self) -> None:
+        self._last_ingested_path().write_text(
+            datetime.now(timezone.utc).isoformat()
+        )
+
+    def last_ingested_at(self) -> datetime | None:
+        p = self._last_ingested_path()
+        if not p.exists():
+            return None
+        return datetime.fromisoformat(p.read_text().strip())
